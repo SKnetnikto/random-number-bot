@@ -33,19 +33,22 @@ app_telegram.add_handler(CommandHandler("pay", pay))
 
 @app.route('/')
 def health_check():
+    print("Health check requested")
     return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
 async def webhook():
+    print(f"Webhook received: {request.get_json()}")
     update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    await app_telegram.process_update(update)
+    if update:
+        await app_telegram.process_update(update)
     return "OK", 200
 
 @app.route('/callback', methods=['POST'])
 async def callback():
+    print(f"Callback received: {request.form}")
     token = request.form.get('token')
     chat_id = request.form.get('custom')
-    print(f"Callback received: {request.form}")
     if token and chat_id:
         response = requests.get(f"https://faucetpay.io/merchant/get-payment/{token}")
         payment_info = response.json()
@@ -67,14 +70,17 @@ async def callback():
 
 @app.route('/success')
 def success():
+    print("Success route accessed")
     return "Payment successful! Return to Telegram."
 
 @app.route('/cancel')
 def cancel():
+    print("Cancel route accessed")
     return "Payment cancelled. Return to Telegram."
 
 @app.route('/payment.html')
 def payment():
+    print("Payment.html route accessed")
     return send_file('static/payment.html')
 
 if __name__ == '__main__':
