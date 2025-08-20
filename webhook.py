@@ -21,7 +21,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    payment_url = f"https://oplata-bot.onrender.com/payment.html?chat_id={chat_id}"
+    payment_url = f"https://random-number-bot.onrender.com/payment.html?chat_id={chat_id}"
     keyboard = [[InlineKeyboardButton("Оплатить", url=payment_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
