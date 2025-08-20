@@ -1,9 +1,11 @@
 from flask import Flask, request, send_file
-from telegram.ext import Application
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
 import random
 import os
 from dotenv import load_dotenv
+import asyncio
 
 load_dotenv()
 app = Flask(__name__)
@@ -11,8 +13,32 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")
 app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Добро пожаловать! Используйте /pay, чтобы оплатить генерацию случайного числа."
+    )
+
+async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    payment_url = f"https://oplata-bot.onrender.com/payment.html?chat_id={chat_id}"
+    keyboard = [[InlineKeyboardButton("Оплатить", url=payment_url)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Нажмите кнопку для оплаты генерации случайного числа:",
+        reply_markup=reply_markup
+    )
+
+app_telegram.add_handler(CommandHandler("start", start))
+app_telegram.add_handler(CommandHandler("pay", pay))
+
 @app.route('/')
 def health_check():
+    return "OK", 200
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), app_telegram.bot)
+    await app_telegram.process_update(update)
     return "OK", 200
 
 @app.route('/callback', methods=['POST'])
@@ -52,4 +78,5 @@ def payment():
     return send_file('static/payment.html')
 
 if __name__ == '__main__':
+    asyncio.run(app_telegram.initialize())
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
