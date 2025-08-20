@@ -11,6 +11,7 @@ load_dotenv()
 app = Flask(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")
+PORT = int(os.getenv("PORT", 5000))
 app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,7 +34,7 @@ app_telegram.add_handler(CommandHandler("pay", pay))
 
 @app.route('/')
 def health_check():
-    print("Health check requested")
+    print(f"Health check requested on port {PORT}")
     return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
@@ -70,19 +71,20 @@ async def callback():
 
 @app.route('/success')
 def success():
-    print("Success route accessed")
+    print(f"Success route accessed on port {PORT}")
     return "Payment successful! Return to Telegram."
 
 @app.route('/cancel')
 def cancel():
-    print("Cancel route accessed")
+    print(f"Cancel route accessed on port {PORT}")
     return "Payment cancelled. Return to Telegram."
 
 @app.route('/payment.html')
 def payment():
-    print("Payment.html route accessed")
+    print(f"Payment.html route accessed on port {PORT}")
     return send_file('static/payment.html')
 
 if __name__ == '__main__':
+    print(f"Starting Flask on port {PORT}")
     asyncio.run(app_telegram.initialize())
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+    app.run(host='0.0.0.0', port=PORT)
