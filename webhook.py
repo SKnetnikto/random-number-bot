@@ -7,17 +7,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")  # Токен от @BotFather
-MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")  # karolev
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")
 app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
+
+@app.route('/')
+def health_check():
+    return "OK", 200
 
 @app.route('/callback', methods=['POST'])
 async def callback():
     token = request.form.get('token')
     chat_id = request.form.get('custom')
+    print(f"Callback received: {request.form}")
     if token and chat_id:
         response = requests.get(f"https://faucetpay.io/merchant/get-payment/{token}")
         payment_info = response.json()
+        print(f"Payment info: {payment_info}")
         if payment_info.get('valid') and payment_info['merchant_username'] == MERCHANT_USERNAME:
             random_number = random.randint(1, 100)
             await app_telegram.bot.send_message(
