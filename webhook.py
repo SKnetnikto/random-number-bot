@@ -1,154 +1,136 @@
-from flask import Flask, request, send_file
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
-import requests
-import random
 import os
-from dotenv import load_dotenv
-import asyncio
 import logging
+import random
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.constants import ParseMode
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('app.log')  # Логи в файл app.log
-    ]
-)
-logger = logging.getLogger(__name__)
-
-load_dotenv()
-app = Flask(__name__)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")
+# ========= CONFIG ==========
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME", "merchant_default")
 PORT = int(os.getenv("PORT", 5000))
 
-logger.info(f"TELEGRAM_TOKEN: {'Set' if TELEGRAM_TOKEN else 'Not set'}")
-logger.info(f"MERCHANT_USERNAME: {'Set' if MERCHANT_USERNAME else 'Not set'}")
-logger.info(f"Starting application on port {PORT}")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Создание и инициализация Application
-app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
-logger.info("Application created successfully")
+# ========= TELEGRAM APP ==========
+app_telegram: Application | None = None
 
-async def initialize_application():
-    try:
-        await app_telegram.initialize()
-        logger.info("Application initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize Application: {str(e)}")
-        raise
 
-# Вызов инициализации в текущем событийном цикле
-loop = asyncio.get_event_loop()
-if loop.is_running():
-    loop.create_task(initialize_application())
-else:
-    asyncio.run(initialize_application())
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Processing /start command for chat_id: {update.message.chat_id}")
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Хэндлер /start"""
     await update.message.reply_text(
-        "Добро пожаловать! Используйте /pay, чтобы оплатить генерацию случайного числа."
+        "👋 Привет! Я бот.\n"
+        "Хочешь случайное число? Используй команду /pay."
     )
 
-async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    logger.info(f"Processing /pay command for chat_id: {chat_id}")
-    payment_url = f"https://random-number-bot-1.onrender.com/payment.html?chat_id={chat_id}"
-    keyboard = [[InlineKeyboardButton("Оплатить", url=payment_url)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+
+async def pay_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Хэндлер /pay — отдаём ссылку на HTML форму оплаты"""
+    chat_id = update.effective_chat.id
+    payment_url = f"https://random-number-bot-1.onrender.com/payment?chat_id={chat_id}"
     await update.message.reply_text(
-        "Нажмите кнопку для оплаты генерации случайного числа:",
-        reply_markup=reply_markup
+        f"Для генерации случайного числа перейди по ссылке и оплати:\n\n{payment_url}"
     )
 
-try:
-    app_telegram.add_handler(CommandHandler("start", start))
-    app_telegram.add_handler(CommandHandler("pay", pay))
-    logger.info("Command handlers added successfully")
-except Exception as e:
-    logger.error(f"Failed to add command handlers: {str(e)}")
-    raise
 
-@app.route('/')
-def health_check():
-    logger.info(f"Health check requested on port {PORT}")
-    return "OK", 200
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Просто пример — позже тут можно отдать статус или что-то еще"""
+    await update.message.reply_text("✅ Оплата подтверждена! Сейчас сгенерируем число...")
 
-@app.route('/webhook', methods=['POST'])
-async def webhook():
+
+# ========= FASTAPI ==========
+app = FastAPI()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Инициализация Telegram application при старте FastAPI."""
+    global app_telegram
+
+    logger.info("Initializing Telegram Bot Application...")
+    app_telegram = (
+        Application.builder()
+        .token(TOKEN)
+        .parse_mode(ParseMode.HTML)
+        .concurrent_updates(True)
+        .build()
+    )
+
+    # === Регистрируем хэндлеры ===
+    app_telegram.add_handler(CommandHandler("start", start_handler))
+    app_telegram.add_handler(CommandHandler("pay", pay_handler))
+
+    await app_telegram.initialize()
+    logger.info("Telegram Bot initialized ✅")
+
+
+class TelegramRequest(BaseModel):
+    update_id: int | None = None  # dummy поле для валидации
+
+
+@app.post("/webhook")
+async def telegram_webhook(req: Request):
+    """Обработка апдейтов от Telegram"""
     try:
-        data = request.get_json(silent=True)
-        logger.info(f"Webhook received: {data}")
-        if not data:
-            logger.warning("Received empty or invalid JSON data")
-            return "Invalid JSON", 400
+        data = await req.json()
+        logger.debug(f"Webhook payload: {data}")
         update = Update.de_json(data, app_telegram.bot)
         if update:
-            logger.info(f"Processing update: {update.to_dict()}")
             await app_telegram.process_update(update)
-            logger.info("Update processed successfully")
-        else:
-            logger.warning("No update object created from webhook data")
-            return "No update", 400
-        return "OK", 200
+        return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error in webhook: {str(e)}")
-        return "Error", 500
+        return {"status": "error", "detail": str(e)}
 
-@app.route('/callback', methods=['POST'])
-async def callback():
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return "<h3>Bot is alive 🚀</h3>"
+
+
+@app.get("/payment")
+async def get_payment_page(chat_id: str):
+    """Отдаём твою HTML форму оплаты, в custom вставим chat_id"""
+    # Просто возвращаем файл, script внутри сам подставит `chat_id`
+    return FileResponse("payment.html")
+
+
+@app.post("/callback")
+async def payment_callback(req: Request):
+    """
+    Callback от FaucetPay после успешного платежа.
+    В req.json/req.form должны прийти данные, включая custom (chat_id).
+    """
     try:
-        logger.info(f"Callback received: {request.form.to_dict()}")
-        token = request.form.get('token')
-        chat_id = request.form.get('custom')
-        if token and chat_id:
-            response = requests.get(f"https://faucetpay.io/merchant/get-payment/{token}")
-            payment_info = response.json()
-            logger.info(f"Payment info: {payment_info}")
-            if payment_info.get('valid') and payment_info['merchant_username'] == MERCHANT_USERNAME:
-                random_number = random.randint(1, 100)
-                await app_telegram.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Платёж получен! Случайное число: {random_number}"
-                )
-                return "OK", 200
-            else:
-                await app_telegram.bot.send_message(
-                    chat_id=chat_id,
-                    text="Ошибка: Платёж не подтверждён или неверный merchant_username."
-                )
-                return "Invalid", 400
-        logger.warning("Missing token or chat_id in callback")
-        return "Error", 400
-    except Exception as e:
-        logger.error(f"Error in callback: {str(e)}")
-        return "Error", 500
+        form = await req.form()
+    except:
+        form = {}
 
-@app.route('/success')
-def success():
-    logger.info(f"Success route accessed on port {PORT}")
-    return "Payment successful! Return to Telegram."
+    chat_id = form.get("custom")
+    status = form.get("status")  # у FaucetPay другое название может быть
 
-@app.route('/cancel')
-def cancel():
-    logger.info(f"Cancel route accessed on port {PORT}")
-    return "Payment cancelled. Return to Telegram."
+    logger.info(f"Payment callback received: {form}")
 
-@app.route('/payment.html')
-def payment():
-    logger.info(f"Payment.html route accessed on port {PORT}")
-    return send_file('static/payment.html')
+    if chat_id:
+        try:
+            random_number = random.randint(1, 1000)
+            text = f"💰 Платёж получен!\nТвоё случайное число: <b>{random_number}</b>"
+            await app_telegram.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Ошибка при попытке ответа пользователю: {e}")
 
-if __name__ == '__main__':
-    logger.info(f"Starting Flask on port {PORT}")
-    try:
-        asyncio.run(app_telegram.initialize())  # Для локального запуска
-        logger.info("Application initialized for local run")
-        app.run(host='0.0.0.0', port=PORT)
-    except Exception as e:
-        logger.error(f"Failed to start Flask: {str(e)}")
-        raise
+    return {"status": "ok"}
+
+
+@app.get("/success")
+async def success_page():
+    return HTMLResponse("<h2>✅ Успешная оплата! Возвращайся в Telegram Бот</h2>")
+
+
+@app.get("/cancel")
+async def cancel_page():
+    return HTMLResponse("<h2>❌ Платёж отменён!</h2>")
