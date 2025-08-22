@@ -21,7 +21,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    payment_url = f"https://random-number-bot.onrender.com/payment.html?chat_id={chat_id}"
+    payment_url = f"https://random-number-bot-1.onrender.com/payment.html?chat_id={chat_id}"
     keyboard = [[InlineKeyboardButton("Оплатить", url=payment_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -88,3 +88,4 @@ if __name__ == '__main__':
     print(f"Starting Flask on port {PORT}")
     asyncio.run(app_telegram.initialize())
     app.run(host='0.0.0.0', port=PORT)
+
