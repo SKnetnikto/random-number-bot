@@ -69,8 +69,11 @@ def health_check():
 @app.route('/webhook', methods=['POST'])
 async def webhook():
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(silent=True)
         logger.info(f"Webhook received: {data}")
+        if not data:
+            logger.warning("Received empty or invalid JSON data")
+            return "Invalid JSON", 400
         update = Update.de_json(data, app_telegram.bot)
         if update:
             logger.info(f"Processing update: {update.to_dict()}")
