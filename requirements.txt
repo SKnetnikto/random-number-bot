@@ -1,5 +1,7 @@
-fastapi
-uvicorn[standard]
-python-telegram-bot==20.8
+
 pydantic
+fastapi==0.115.0
+uvicorn==0.30.5
+python-telegram-bot==20.6
+
 
