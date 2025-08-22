@@ -29,14 +29,24 @@ logger.info(f"TELEGRAM_TOKEN: {'Set' if TELEGRAM_TOKEN else 'Not set'}")
 logger.info(f"MERCHANT_USERNAME: {'Set' if MERCHANT_USERNAME else 'Not set'}")
 logger.info(f"Starting application on port {PORT}")
 
-try:
-    app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
-    logger.info("Application created successfully")
-    asyncio.run(app_telegram.initialize())  # Инициализация сразу после создания
-    logger.info("Application initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Application: {str(e)}")
-    raise
+# Создание и инициализация Application
+app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
+logger.info("Application created successfully")
+
+async def initialize_application():
+    try:
+        await app_telegram.initialize()
+        logger.info("Application initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Application: {str(e)}")
+        raise
+
+# Вызов инициализации в текущем событийном цикле
+loop = asyncio.get_event_loop()
+if loop.is_running():
+    loop.create_task(initialize_application())
+else:
+    asyncio.run(initialize_application())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Processing /start command for chat_id: {update.message.chat_id}")
