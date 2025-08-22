@@ -14,7 +14,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('app.log')  # Логи будут записываться в файл app.log
+        logging.FileHandler('app.log')  # Логи в файл app.log
     ]
 )
 logger = logging.getLogger(__name__)
@@ -31,6 +31,8 @@ logger.info(f"Starting application on port {PORT}")
 
 try:
     app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
+    logger.info("Application created successfully")
+    asyncio.run(app_telegram.initialize())  # Инициализация сразу после создания
     logger.info("Application initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize Application: {str(e)}")
@@ -134,7 +136,7 @@ def payment():
 if __name__ == '__main__':
     logger.info(f"Starting Flask on port {PORT}")
     try:
-        asyncio.run(app_telegram.initialize())
+        asyncio.run(app_telegram.initialize())  # Для локального запуска
         logger.info("Application initialized for local run")
         app.run(host='0.0.0.0', port=PORT)
     except Exception as e:
