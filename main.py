@@ -265,6 +265,4 @@ telegram_app.add_handler(CommandHandler("random", random_number))
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
 
 # === Запуск (для локального теста) ===
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+
