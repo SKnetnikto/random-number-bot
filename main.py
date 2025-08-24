@@ -23,7 +23,7 @@ if not all([TELEGRAM_TOKEN, WEBHOOK_URL, MERCHANT_USERNAME]):
     raise ValueError(f"Missing environment variables: {', '.join(missing)}")
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Инициализация Telegram-бота
@@ -84,9 +84,14 @@ async def cancel():
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    update = await request.json()
-    await telegram_app.process_update(Update.de_json(update, telegram_app.bot))
-    return {"ok": True}
+    try:
+        update = await request.json()
+        logger.debug(f"Received webhook update: {update}")
+        await telegram_app.process_update(Update.de_json(update, telegram_app.bot))
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Webhook processing error: {str(e)}")
+        return {"ok": False}
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,37 +118,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.data == "pay":
         user_id = query.from_user.id
-        logger.info(f"Processing payment request for user_id: {user_id}")
+        logger.debug(f"Processing payment request for user_id: {user_id}")
         try:
             async with httpx.AsyncClient() as client:
+                payment_data = {
+                    "merchant_username": MERCHANT_USERNAME,
+                    "item_description": "Доступ к генератору случайных чисел",
+                    "amount1": "0.0005",
+                    "currency1": "BTC",
+                    "currency2": "",
+                    "custom": str(user_id),
+                    "callback_url": f"{WEBHOOK_URL}/faucetpay_ipn",
+                    "success_url": f"{WEBHOOK_URL}/success",
+                    "cancel_url": f"{WEBHOOK_URL}/cancel",
+                }
+                logger.debug(f"Sending payment request to FaucetPay: {payment_data}")
                 resp = await client.post(
                     "https://faucetpay.io/merchant/webscr",
-                    data={
-                        "merchant_username": MERCHANT_USERNAME,
-                        "item_description": "Доступ к генератору случайных чисел",
-                        "amount1": "0.0005",
-                        "currency1": "BTC",
-                        "currency2": "",
-                        "custom": str(user_id),
-                        "callback_url": f"{WEBHOOK_URL}/faucetpay_ipn",
-                        "success_url": f"{WEBHOOK_URL}/success",
-                        "cancel_url": f"{WEBHOOK_URL}/cancel",
-                    },
+                    data=payment_data,
                 )
+                logger.debug(f"FaucetPay response status: {resp.status_code}")
+                logger.debug(f"FaucetPay response headers: {resp.headers}")
+                logger.debug(f"FaucetPay response content: {resp.text}")
+
+                if resp.status_code != 200:
+                    logger.error(f"FaucetPay request failed with status {resp.status_code}: {resp.text}")
+                    await query.edit_message_text("❌ Ошибка при создании платежа: сервер FaucetPay недоступен.")
+                    return
+
                 try:
                     data = resp.json()
-                    logger.info(f"FaucetPay response: {data}")
+                    logger.debug(f"FaucetPay JSON response: {data}")
                     if data.get("status") == 200 and data.get("data", {}).get("link"):
                         payment_url = data["data"]["link"]
                     else:
                         logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
-                        await query.edit_message_text("❌ Ошибка при создании платежа.")
+                        await query.edit_message_text(f"❌ Ошибка FaucetPay: {data.get('message', 'Unknown error')}")
                         return
                 except ValueError:
+                    logger.debug("FaucetPay response is not JSON, assuming redirect")
                     payment_url = str(resp.url)  # Редирект на страницу оплаты
+
                 await query.edit_message_text(
                     f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
                     parse_mode="HTML",
+                    disable_web_page_preview=True,
                 )
         except Exception as e:
             logger.error(f"Error creating payment for user_id {user_id}: {str(e)}")
@@ -160,15 +179,15 @@ async def faucetpay_ipn(
     amount1: str = Form(...),
     currency1: str = Form(...),
 ):
-    logger.info(f"FaucetPay IPN received: merchant_username={merchant_username}, custom={custom}, status={status}")
+    logger.debug(f"FaucetPay IPN received: token={token}, merchant_username={merchant_username}, custom={custom}, status={status}")
     if merchant_username != MERCHANT_USERNAME:
         logger.warning(f"Invalid merchant_username: {merchant_username}")
         raise HTTPException(status_code=400, detail="Invalid merchant_username")
     
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"https://faucetpay.io/merchant/get-payment/{token}")
+        logger.debug(f"Token validation response: {resp.text}")
         token_data = resp.json()
-        logger.info(f"Token validation response: {token_data}")
         if not token_data.get("valid", False):
             logger.warning("Invalid token")
             raise HTTPException(status_code=400, detail="Invalid token")
