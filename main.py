@@ -87,6 +87,8 @@ async def webhook(request: Request):
     try:
         update = await request.json()
         logger.debug(f"Received webhook update: {update}")
+        if 'callback_query' in update:
+            logger.debug(f"Callback query received: {update['callback_query']}")
         await telegram_app.process_update(Update.de_json(update, telegram_app.bot))
         return {"ok": True}
     except Exception as e:
@@ -100,6 +102,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Добро пожаловать! Оплатите, чтобы разблокировать функции.",
         reply_markup=reply_markup,
+        disable_notification=True,
     )
 
 # Команда /random
@@ -116,57 +119,63 @@ async def random_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "pay":
-        user_id = query.from_user.id
-        logger.debug(f"Processing payment request for user_id: {user_id}")
-        try:
-            async with httpx.AsyncClient() as client:
-                payment_data = {
-                    "merchant_username": MERCHANT_USERNAME,
-                    "item_description": "Доступ к генератору случайных чисел",
-                    "amount1": "0.0005",
-                    "currency1": "BTC",
-                    "currency2": "",
-                    "custom": str(user_id),
-                    "callback_url": f"{WEBHOOK_URL}/faucetpay_ipn",
-                    "success_url": f"{WEBHOOK_URL}/success",
-                    "cancel_url": f"{WEBHOOK_URL}/cancel",
-                }
-                logger.debug(f"Sending payment request to FaucetPay: {payment_data}")
-                resp = await client.post(
-                    "https://faucetpay.io/merchant/webscr",
-                    data=payment_data,
-                )
-                logger.debug(f"FaucetPay response status: {resp.status_code}")
-                logger.debug(f"FaucetPay response headers: {resp.headers}")
-                logger.debug(f"FaucetPay response content: {resp.text}")
+    logger.debug(f"Callback data received: {query.data}")
+    if query.data != "pay":
+        logger.warning(f"Unexpected callback data: {query.data}")
+        await query.edit_message_text("❌ Неизвестная команда.")
+        return
 
-                if resp.status_code != 200:
-                    logger.error(f"FaucetPay request failed with status {resp.status_code}: {resp.text}")
-                    await query.edit_message_text("❌ Ошибка при создании платежа: сервер FaucetPay недоступен.")
+    user_id = query.from_user.id
+    logger.debug(f"Processing payment request for user_id: {user_id}")
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            payment_data = {
+                "merchant_username": MERCHANT_USERNAME,
+                "item_description": "Доступ к генератору случайных чисел",
+                "amount1": "0.0005",
+                "currency1": "BTC",
+                "currency2": "",
+                "custom": str(user_id),
+                "callback_url": f"{WEBHOOK_URL}/faucetpay_ipn",
+                "success_url": f"{WEBHOOK_URL}/success",
+                "cancel_url": f"{WEBHOOK_URL}/cancel",
+            }
+            logger.debug(f"Sending payment request to FaucetPay: {payment_data}")
+            resp = await client.post(
+                "https://faucetpay.io/merchant/webscr",
+                data=payment_data,
+            )
+            logger.debug(f"FaucetPay response status: {resp.status_code}")
+            logger.debug(f"FaucetPay response headers: {resp.headers}")
+            logger.debug(f"FaucetPay response content: {resp.text}")
+
+            if resp.status_code != 200:
+                logger.error(f"FaucetPay request failed with status {resp.status_code}: {resp.text}")
+                await query.edit_message_text(f"❌ Ошибка FaucetPay: статус {resp.status_code}")
+                return
+
+            try:
+                data = resp.json()
+                logger.debug(f"FaucetPay JSON response: {data}")
+                if data.get("status") == 200 and data.get("data", {}).get("link"):
+                    payment_url = data["data"]["link"]
+                else:
+                    logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
+                    await query.edit_message_text(f"❌ Ошибка FaucetPay: {data.get('message', 'Unknown error')}")
                     return
+            except ValueError:
+                logger.debug("FaucetPay response is not JSON, using redirect URL")
+                payment_url = str(resp.url)
 
-                try:
-                    data = resp.json()
-                    logger.debug(f"FaucetPay JSON response: {data}")
-                    if data.get("status") == 200 and data.get("data", {}).get("link"):
-                        payment_url = data["data"]["link"]
-                    else:
-                        logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
-                        await query.edit_message_text(f"❌ Ошибка FaucetPay: {data.get('message', 'Unknown error')}")
-                        return
-                except ValueError:
-                    logger.debug("FaucetPay response is not JSON, assuming redirect")
-                    payment_url = str(resp.url)  # Редирект на страницу оплаты
-
-                await query.edit_message_text(
-                    f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-        except Exception as e:
-            logger.error(f"Error creating payment for user_id {user_id}: {str(e)}")
-            await query.edit_message_text("❌ Ошибка сервера при создании платежа.")
+            await query.edit_message_text(
+                f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                disable_notification=True,
+            )
+    except Exception as e:
+        logger.error(f"Error creating payment for user_id {user_id}: {str(e)}")
+        await query.edit_message_text("❌ Ошибка сервера при создании платежа.")
 
 # Обработка IPN Callback
 @app.post("/faucetpay_ipn")
@@ -202,6 +211,7 @@ async def faucetpay_ipn(
         await telegram_app.bot.send_message(
             chat_id=user_id,
             text=f"✅ Оплата {amount1} {currency1} получена!\n\nТеперь доступен /random 🎲",
+            disable_notification=True,
         )
         logger.info(f"User {user_id} marked as paid")
     except ValueError:
