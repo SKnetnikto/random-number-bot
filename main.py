@@ -5,6 +5,7 @@ import httpx
 import logging
 import os
 import sqlite3
+import json
 
 app = FastAPI()
 
@@ -86,9 +87,9 @@ async def cancel():
 async def webhook(request: Request):
     try:
         update = await request.json()
-        logger.debug(f"Received webhook update: {update}")
+        logger.debug(f"Received webhook update: {json.dumps(update, indent=2)}")
         if 'callback_query' in update:
-            logger.debug(f"Callback query received: {update['callback_query']}")
+            logger.debug(f"Callback query received: {json.dumps(update['callback_query'], indent=2)}")
         await telegram_app.process_update(Update.de_json(update, telegram_app.bot))
         return {"ok": True}
     except Exception as e:
@@ -122,13 +123,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"Callback data received: {query.data}")
     if query.data != "pay":
         logger.warning(f"Unexpected callback data: {query.data}")
-        await query.edit_message_text("❌ Неизвестная команда.")
+        await query.message.reply_text(f"❌ Неизвестная команда: {query.data}")
         return
 
     user_id = query.from_user.id
     logger.debug(f"Processing payment request for user_id: {user_id}")
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
             payment_data = {
                 "merchant_username": MERCHANT_USERNAME,
                 "item_description": "Доступ к генератору случайных чисел",
@@ -151,7 +152,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if resp.status_code != 200:
                 logger.error(f"FaucetPay request failed with status {resp.status_code}: {resp.text}")
-                await query.edit_message_text(f"❌ Ошибка FaucetPay: статус {resp.status_code}")
+                await query.message.reply_text(f"❌ Ошибка FaucetPay: статус {resp.status_code}")
                 return
 
             try:
@@ -161,21 +162,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     payment_url = data["data"]["link"]
                 else:
                     logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
-                    await query.edit_message_text(f"❌ Ошибка FaucetPay: {data.get('message', 'Unknown error')}")
+                    await query.message.reply_text(f"❌ Ошибка FaucetPay: {data.get('message', 'Unknown error')}")
                     return
             except ValueError:
                 logger.debug("FaucetPay response is not JSON, using redirect URL")
                 payment_url = str(resp.url)
 
-            await query.edit_message_text(
-                f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                disable_notification=True,
-            )
+            try:
+                await query.edit_message_text(
+                    f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    disable_notification=True,
+                )
+            except Exception as e:
+                logger.error(f"Failed to edit message: {str(e)}")
+                await query.message.reply_text(
+                    f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    disable_notification=True,
+                )
     except Exception as e:
         logger.error(f"Error creating payment for user_id {user_id}: {str(e)}")
-        await query.edit_message_text("❌ Ошибка сервера при создании платежа.")
+        await query.message.reply_text("❌ Ошибка сервера при создании платежа.")
 
 # Обработка IPN Callback
 @app.post("/faucetpay_ipn")
@@ -193,7 +203,7 @@ async def faucetpay_ipn(
         logger.warning(f"Invalid merchant_username: {merchant_username}")
         raise HTTPException(status_code=400, detail="Invalid merchant_username")
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(f"https://faucetpay.io/merchant/get-payment/{token}")
         logger.debug(f"Token validation response: {resp.text}")
         token_data = resp.json()
