@@ -5,134 +5,99 @@ import httpx
 import logging
 import os
 import sqlite3
-import json
+import uvicorn
 
 app = FastAPI()
 
-# Настройка переменных окружения
+# === Настройка логирования ===
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# === Переменные окружения (указываются в Render) ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")
 
-# Проверка переменных окружения
 if not all([TELEGRAM_TOKEN, WEBHOOK_URL, MERCHANT_USERNAME]):
-    missing = [var for var, val in [
-        ("TELEGRAM_TOKEN", TELEGRAM_TOKEN),
-        ("WEBHOOK_URL", WEBHOOK_URL),
-        ("MERCHANT_USERNAME", MERCHANT_USERNAME),
-    ] if not val]
-    raise ValueError(f"Missing environment variables: {', '.join(missing)}")
+    raise ValueError("Missing environment variables: TELEGRAM_TOKEN, WEBHOOK_URL, MERCHANT_USERNAME")
 
-# Настройка логирования
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Инициализация Telegram-бота
+# === Инициализация Telegram-бота ===
 telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# Инициализация SQLite
+# === База данных SQLite ===
 def init_db():
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS paid_users (user_id INTEGER PRIMARY KEY, paid BOOLEAN)")
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("users.db") as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS paid_users (user_id INTEGER PRIMARY KEY)")
+        conn.commit()
 
-def mark_user_paid(user_id):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO paid_users (user_id, paid) VALUES (?, ?)", (user_id, True))
-    conn.commit()
-    conn.close()
+def mark_user_paid(user_id: int):
+    with sqlite3.connect("users.db") as conn:
+        conn.execute("INSERT OR IGNORE INTO paid_users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
 
-def is_user_paid(user_id):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("SELECT paid FROM paid_users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result and result[0]
+def is_user_paid(user_id: int) -> bool:
+    with sqlite3.connect("users.db") as conn:
+        cursor = conn.execute("SELECT 1 FROM paid_users WHERE user_id = ?", (user_id,))
+        return cursor.fetchone() is not None
 
-# События запуска и остановки
+# === Запуск и остановка бота ===
 @app.on_event("startup")
-async def on_startup():
-    try:
-        init_db()
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-        logger.info(f"Bot started and webhook set to {WEBHOOK_URL}/webhook")
-    except Exception as e:
-        logger.error(f"Failed to start bot or set webhook: {str(e)}")
-        raise
+async def startup():
+    init_db()
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+    logger.info("Bot started, webhook set.")
 
 @app.on_event("shutdown")
-async def on_shutdown():
+async def shutdown():
     await telegram_app.stop()
 
-# Маршруты
+# === Маршруты ===
 @app.get("/")
 async def root():
-    return {"message": "Bot is running"}
-
-@app.get("/success")
-async def success():
-    return {"message": "Payment successful! Return to Telegram."}
-
-@app.get("/cancel")
-async def cancel():
-    return {"message": "Payment cancelled. Return to Telegram."}
+    return {"status": "running"}
 
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        update = await request.json()
-        logger.debug(f"Received webhook update: {json.dumps(update, indent=2)}")
-        if 'callback_query' in update:
-            logger.debug(f"Callback query received: {json.dumps(update['callback_query'], indent=2)}")
-        await telegram_app.process_update(Update.de_json(update, telegram_app.bot))
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
         return {"ok": True}
     except Exception as e:
-        logger.error(f"Webhook processing error: {str(e)}")
+        logger.error(f"Webhook error: {e}")
         return {"ok": False}
 
-# Команда /start
+# === Обработчики команд ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("Оплатить через FaucetPay", callback_data="pay")]]
+    keyboard = [[InlineKeyboardButton("💳 Оплатить 0.0005 BTC", callback_data="pay")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Добро пожаловать! Оплатите, чтобы разблокировать функции.",
-        reply_markup=reply_markup,
-        disable_notification=True,
+        "Добро пожаловать! Нажмите кнопку ниже, чтобы получить доступ к /random.",
+        reply_markup=reply_markup
     )
 
-# Команда /random
 async def random_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_user_paid(user_id):
-        await update.message.reply_text("Пожалуйста, оплатите, чтобы использовать /random.")
+        await update.message.reply_text("🔒 Сначала оплатите через кнопку /start")
         return
     import random
     number = random.randint(1, 100)
-    await update.message.reply_text(f"Ваше случайное число: {number}")
+    await update.message.reply_text(f"🎉 Ваше число: {number}")
 
-# Обработка кнопки оплаты
+# === Обработка кнопки оплаты ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    logger.debug(f"Callback data received: {query.data}")
-    if query.data != "pay":
-        logger.warning(f"Unexpected callback data: {query.data}")
-        await query.message.reply_text(f"❌ Неизвестная команда: {query.data}")
-        return
-
     user_id = query.from_user.id
-    logger.debug(f"Processing payment request for user_id: {user_id}")
+
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
             payment_data = {
                 "merchant_username": MERCHANT_USERNAME,
-                "item_description": "Доступ к генератору случайных чисел",
+                "item_description": "Доступ к боту",
                 "amount1": "0.0005",
                 "currency1": "BTC",
                 "currency2": "",
@@ -141,53 +106,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "success_url": f"{WEBHOOK_URL}/success",
                 "cancel_url": f"{WEBHOOK_URL}/cancel",
             }
-            logger.debug(f"Sending payment request to FaucetPay: {payment_data}")
+
             resp = await client.post(
                 "https://faucetpay.io/merchant/webscr",
-                data=payment_data,
+                data=payment_data
             )
-            logger.debug(f"FaucetPay response status: {resp.status_code}")
-            logger.debug(f"FaucetPay response headers: {resp.headers}")
-            logger.debug(f"FaucetPay response content: {resp.text}")
 
-            if resp.status_code != 200:
-                logger.error(f"FaucetPay request failed with status {resp.status_code}: {resp.text}")
-                await query.message.reply_text(f"❌ Ошибка FaucetPay: статус {resp.status_code}")
-                return
+            payment_url = str(resp.url)
 
-            try:
-                data = resp.json()
-                logger.debug(f"FaucetPay JSON response: {data}")
-                if data.get("status") == 200 and data.get("data", {}).get("link"):
-                    payment_url = data["data"]["link"]
-                else:
-                    logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
-                    await query.message.reply_text(f"❌ Ошибка FaucetPay: {data.get('message', 'Unknown error')}")
-                    return
-            except ValueError:
-                logger.debug("FaucetPay response is not JSON, using redirect URL")
-                payment_url = str(resp.url)
-
-            try:
-                await query.edit_message_text(
-                    f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    disable_notification=True,
-                )
-            except Exception as e:
-                logger.error(f"Failed to edit message: {str(e)}")
-                await query.message.reply_text(
-                    f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    disable_notification=True,
-                )
+            await query.edit_message_text(
+                f"✅ Оплатите:\n\n👉 <a href='{payment_url}'>Перейти к оплате</a>",
+                parse_mode="HTML",
+                disable_web_page_preview=False
+            )
     except Exception as e:
-        logger.error(f"Error creating payment for user_id {user_id}: {str(e)}")
-        await query.message.reply_text("❌ Ошибка сервера при создании платежа.")
+        logger.error(f"Payment error: {e}")
+        await query.message.reply_text("❌ Ошибка при создании платежа. Попробуйте позже.")
 
-# Обработка IPN Callback
+# === Обработка IPN от FaucetPay ===
 @app.post("/faucetpay_ipn")
 async def faucetpay_ipn(
     token: str = Form(...),
@@ -198,21 +134,22 @@ async def faucetpay_ipn(
     amount1: str = Form(...),
     currency1: str = Form(...),
 ):
-    logger.debug(f"FaucetPay IPN received: token={token}, merchant_username={merchant_username}, custom={custom}, status={status}")
+    logger.info(f"IPN received: {token=}, {custom=}, {status=}")
+
     if merchant_username != MERCHANT_USERNAME:
-        logger.warning(f"Invalid merchant_username: {merchant_username}")
-        raise HTTPException(status_code=400, detail="Invalid merchant_username")
-    
+        raise HTTPException(status_code=400, detail="Invalid merchant")
+
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(f"https://faucetpay.io/merchant/get-payment/{token}")
-        logger.debug(f"Token validation response: {resp.text}")
-        token_data = resp.json()
-        if not token_data.get("valid", False):
-            logger.warning("Invalid token")
-            raise HTTPException(status_code=400, detail="Invalid token")
-    
+        try:
+            resp = await client.get(f"https://faucetpay.io/merchant/get-payment/{token}")
+            token_data = resp.json()
+            if not token_data.get("valid", False):
+                raise HTTPException(status_code=400, detail="Invalid token")
+        except Exception as e:
+            logger.error(f"Token validation failed: {e}")
+            raise HTTPException(status_code=400, detail="Token check failed")
+
     if status.lower() != "completed":
-        logger.warning(f"Payment not completed: status={status}")
         return {"status": "ok"}
 
     try:
@@ -220,24 +157,24 @@ async def faucetpay_ipn(
         mark_user_paid(user_id)
         await telegram_app.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Оплата {amount1} {currency1} получена!\n\nТеперь доступен /random 🎲",
-            disable_notification=True,
+            text=f"✅ Оплата {amount1} {currency1} прошла!\n\nТеперь доступен /random 🎲",
+            disable_notification=True
         )
         logger.info(f"User {user_id} marked as paid")
     except ValueError:
-        logger.error(f"Invalid custom field: {custom}")
-        raise HTTPException(status_code=400, detail="Invalid user_id")
+        logger.error(f"Invalid custom ID: {custom}")
+        raise HTTPException(status_code=400, detail="Invalid user ID")
     except Exception as e:
-        logger.error(f"Error processing IPN for user_id {custom}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Error sending message: {e}")
+        raise HTTPException(status_code=500, detail="Internal error")
 
     return {"status": "ok"}
 
-# Регистрация обработчиков
+# === Регистрация обработчиков ===
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("random", random_number))
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
 
+# === Запуск (для локального теста) ===
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=5000)
