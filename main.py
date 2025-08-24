@@ -1,13 +1,11 @@
 import logging
 import os
 import random
-import requests
-from flask import Flask, Request, request
+import httpx
+from fastapi import FastAPI, Request, Form, HTTPException
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, Defaults
 from telegram.constants import ParseMode
-from asgiref.wsgi import WsgiToAsgi
-from dotenv import load_dotenv
 
 # Логирование
 logging.basicConfig(
@@ -16,13 +14,10 @@ logging.basicConfig(
 logger = logging.getLogger("bot")
 
 # Проверка переменных окружения
-load_dotenv()
-app = Flask(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://random-number-bot-1.onrender.com
 MERCHANT_USERNAME = os.getenv("MERCHANT_USERNAME")
-API_KEY = os.getenv("FAUCETPAY_API_KEY")  # создается в FaucetPay Merchant
-PORT = int(os.getenv("PORT", 5000))
+API_KEY = os.getenv("FAUCETPAY_API_KEY")
 
 if not all([TELEGRAM_TOKEN, WEBHOOK_URL, MERCHANT_USERNAME, API_KEY]):
     missing = [var for var, val in [
@@ -33,6 +28,9 @@ if not all([TELEGRAM_TOKEN, WEBHOOK_URL, MERCHANT_USERNAME, API_KEY]):
     ] if not val]
     logger.error(f"Missing environment variables: {', '.join(missing)}")
     raise ValueError(f"Missing environment variables: {', '.join(missing)}")
+
+# FastAPI app
+app = FastAPI()
 
 # Telegram Application
 defaults = Defaults(parse_mode=ParseMode.HTML)
@@ -62,30 +60,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         logger.info(f"Processing payment request for user_id: {user_id}")
         try:
-            resp = requests.post(
-                "https://faucetpay.io/merchant/create-payment",
-                data={
-                    "merchant_username": MERCHANT_USERNAME,
-                    "item_description": "Доступ к генератору случайных чисел",
-                    "amount1": "0.0005",
-                    "currency1": "BTC",
-                    "custom": str(user_id),
-                    "callback_url": f"{WEBHOOK_URL}/faucetpay_ipn",
-                    "success_url": f"{WEBHOOK_URL}/success",
-                    "cancel_url": f"{WEBHOOK_URL}/cancel",
-                    "api_key": API_KEY,
-                },
-            )
-            data = resp.json()
-            logger.info(f"FaucetPay response: {data}")
-            if data.get("status") == 200 and data.get("data", {}).get("link"):
-                payment_url = data["data"]["link"]
-                await query.edit_message_text(
-                    f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://faucetpay.io/merchant/create-payment",
+                    data={
+                        "merchant_username": MERCHANT_USERNAME,
+                        "item_description": "Доступ к генератору случайных чисел",
+                        "amount1": "0.0005",
+                        "currency1": "BTC",
+                        "custom": str(user_id),
+                        "callback_url": f"{WEBHOOK_URL}/faucetpay_ipn",
+                        "success_url": f"{WEBHOOK_URL}/success",
+                        "cancel_url": f"{WEBHOOK_URL}/cancel",
+                        "api_key": API_KEY,
+                    },
                 )
-            else:
-                logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
-                await query.edit_message_text("❌ Ошибка при создании платежа.")
+                data = resp.json()
+                logger.info(f"FaucetPay response: {data}")
+                if data.get("status") == 200 and data.get("data", {}).get("link"):
+                    payment_url = data["data"]["link"]
+                    await query.edit_message_text(
+                        f"✅ Ссылка для оплаты создана!\n\n👉 <a href='{payment_url}'>Перейдите сюда для оплаты</a>",
+                    )
+                else:
+                    logger.error(f"FaucetPay error: {data.get('message', 'Unknown error')}")
+                    await query.edit_message_text("❌ Ошибка при создании платежа.")
         except Exception as e:
             logger.error(f"Error creating payment for user_id {user_id}: {str(e)}")
             await query.edit_message_text("❌ Ошибка сервера при создании платежа.")
@@ -110,11 +109,46 @@ telegram_app.add_handler(CommandHandler("random", random_number))
 telegram_app.add_handler(CommandHandler("coinflip", coinflip))
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
 
-# ---------- Webhook от Telegram ----------
-@app.route("/webhook", methods=["POST"])
-async def telegram_webhook():
+# ---------- IPN от FaucetPay ----------
+@app.post("/faucetpay_ipn")
+async def faucetpay_ipn(
+    merchant_username: str = Form(...),
+    custom: str = Form(...),
+    status: str = Form(...),
+    transaction_id: str = Form(...),
+    amount1: str = Form(...),
+    currency1: str = Form(...),
+):
+    logger.info(f"FaucetPay IPN received: merchant_username={merchant_username}, custom={custom}, status={status}")
+    if merchant_username != MERCHANT_USERNAME:
+        logger.warning(f"Invalid merchant_username: {merchant_username}")
+        raise HTTPException(status_code=400, detail="Invalid merchant_username")
+    if status.lower() != "completed":
+        logger.warning(f"Payment not completed: status={status}")
+        return {"status": "ok"}
+
     try:
-        data = request.get_json()
+        user_id = int(custom)
+        paid_users[user_id] = True
+        await telegram_app.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Оплата {amount1} {currency1} получена!\n\nТеперь доступен /random 🎲",
+        )
+        logger.info(f"User {user_id} marked as paid")
+    except ValueError:
+        logger.error(f"Invalid custom field: {custom}")
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    except Exception as e:
+        logger.error(f"Error processing IPN for user_id {custom}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    return {"status": "ok"}
+
+# ---------- Webhook от Telegram ----------
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
         logger.info(f"Webhook received: {data}")
         update = Update.de_json(data, telegram_app.bot)
         if update:
@@ -128,52 +162,17 @@ async def telegram_webhook():
         logger.error(f"Error in webhook: {str(e)}")
         return {"ok": False}, 500
 
-# ---------- IPN от FaucetPay ----------
-@app.route("/faucetpay_ipn", methods=["POST"])
-async def faucetpay_ipn():
-    logger.info(f"FaucetPay IPN received: {request.form.to_dict()}")
-    merchant_username = request.form.get("merchant_username")
-    custom = request.form.get("custom")
-    status = request.form.get("status")
-    transaction_id = request.form.get("transaction_id")
-    amount1 = request.form.get("amount1")
-    currency1 = request.form.get("currency1")
-
-    if merchant_username != MERCHANT_USERNAME:
-        logger.warning(f"Invalid merchant_username: {merchant_username}")
-        return {"status": "error", "detail": "Invalid merchant_username"}, 400
-    if status.lower() != "completed":
-        logger.warning(f"Payment not completed: status={status}")
-        return {"status": "ok"}, 200
-
-    try:
-        user_id = int(custom)
-        paid_users[user_id] = True
-        await telegram_app.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ Оплата {amount1} {currency1} получена!\n\nТеперь доступен /random 🎲",
-        )
-        logger.info(f"User {user_id} marked as paid")
-    except ValueError:
-        logger.error(f"Invalid custom field: {custom}")
-        return {"status": "error", "detail": "Invalid user_id"}, 400
-    except Exception as e:
-        logger.error(f"Error processing IPN for user_id {custom}: {str(e)}")
-        return {"status": "error", "detail": "Internal server error"}, 500
-
-    return {"status": "ok"}
-
 # ---------- Маршруты для FaucetPay ----------
-@app.route("/success")
-def success():
+@app.get("/success")
+async def success():
     return {"message": "Payment successful! Return to Telegram."}
 
-@app.route("/cancel")
-def cancel():
+@app.get("/cancel")
+async def cancel():
     return {"message": "Payment cancelled. Return to Telegram."}
 
-@app.route("/")
-def root():
+@app.get("/")
+async def root():
     return {"message": "Bot is running"}
 
 # Startup / Shutdown
@@ -196,15 +195,3 @@ async def on_shutdown():
         logger.info("Bot stopped and shutdown")
     except Exception as e:
         logger.error(f"Failed to stop bot: {str(e)}")
-
-# Адаптация Flask для ASGI
-app = WsgiToAsgi(app)
-
-if __name__ == "__main__":
-    logger.info(f"Starting Flask on port {PORT}")
-    try:
-        import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=PORT)
-    except Exception as e:
-        logger.error(f"Failed to start Flask: {str(e)}")
-        raise
